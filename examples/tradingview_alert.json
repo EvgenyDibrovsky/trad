@@ -1,0 +1,10 @@
+{
+  "symbol": "EURUSD",
+  "signal": "BUY",
+  "timeframe": "5",
+  "timestamp": "2026-04-01T15:19:59Z",
+  "entry_time": "2026-04-01T15:20:00Z",
+  "expiry_minutes": 5,
+  "strength": 80,
+  "reasons": ["Supertrend bullish flip"]
+}

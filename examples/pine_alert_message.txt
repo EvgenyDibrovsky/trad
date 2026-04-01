@@ -1,0 +1,8 @@
+# Вставьте в поле Message вебхук-алерта TradingView.
+# Плейсхолдеры (ticker, interval, timenow) проверьте в справке редактора алерта.
+
+BUY:
+{"symbol":"{{ticker}}","signal":"BUY","timeframe":"{{interval}}","timestamp":"{{timenow}}","expiry_minutes":5}
+
+SELL:
+{"symbol":"{{ticker}}","signal":"SELL","timeframe":"{{interval}}","timestamp":"{{timenow}}","expiry_minutes":5}
