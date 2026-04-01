@@ -2,7 +2,7 @@
 
 Веб-приложение: **TradingView Alert → webhook → FastAPI → хранилище → React UI**. Автоторговли нет.
 
-Хранение состояния: **Upstash Redis** (REST) на проде/Vercel; без Redis данные держатся **в памяти** процесса (только для локальной отладки).
+Хранение состояния: **Upstash Redis** (REST) на проде/Vercel.
 
 ## Стек
 
@@ -48,9 +48,9 @@ npm run dev
 
 Открой **http://127.0.0.1:5173** — Vite проксирует `/api` на порт **8000** (`vite.config.ts`).
 
-### Опционально: Redis локально
+### Redis обязательно
 
-Скопируйте `.env.example` → `.env` и вставьте `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` из [Upstash Console](https://console.upstash.com/). Иначе режим **memory** (данные теряются при перезапуске).
+Скопируйте `.env.example` → `.env` и вставьте `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` из [Upstash Console](https://console.upstash.com/).
 
 ## Переменные окружения
 
@@ -75,7 +75,7 @@ npm run dev
 
 **TradingView Webhook URL** (после деплоя):
 
-`https://<ваш-домен-vercel>/api/webhook/tradingview`
+`https://trad.vercel.app/api/webhook/tradingview`
 
 Пример тела JSON:
 
@@ -114,8 +114,12 @@ curl -X POST https://<host>/api/test-signal \
 Если сборка Python не подхватывается автоматически, в настройках проекта включите **Python** для функций в каталоге `api/` (см. [Vercel Python](https://vercel.com/docs/functions/runtimes/python)).
 
 После деплоя в TradingView укажите публичный **HTTPS** URL:  
-`https://<project>.vercel.app/api/webhook/tradingview`  
+`https://trad.vercel.app/api/webhook/tradingview`  
 (не `localhost` / `127.0.0.1`).
+
+### Webhook response
+
+При успешном приёме webhook backend возвращает JSON с `route: "/api/webhook/tradingview"` и `storage: "upstash_redis"`.
 
 ## Ответственность
 

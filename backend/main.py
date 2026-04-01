@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -23,6 +24,7 @@ from backend.storage import storage_mode
 from backend.symbols import validate_known_symbol
 
 app = FastAPI(title="trad", version="2.0.0")
+logger = logging.getLogger("trad.api")
 
 _origins = os.getenv("CORS_ORIGINS", "*").strip()
 if _origins == "*":
@@ -128,7 +130,13 @@ async def webhook_tradingview(request: Request) -> Any:
             code = "invalid_entry_time"
         return JSONResponse({"ok": False, "error": code, "message": msg}, status_code=400)
 
-    return {"ok": True, "record": enrich_countdown(rec)}
+    logger.info("webhook_tradingview accepted symbol=%s signal=%s", rec["symbol"], rec["signal"])
+    return {
+        "ok": True,
+        "route": "/api/webhook/tradingview",
+        "storage": storage_mode(),
+        "record": enrich_countdown(rec),
+    }
 
 
 @app.post("/api/test-signal")

@@ -1,6 +1,4 @@
-"""
-Хранилище: Upstash Redis на Vercel; in-memory для локальной разработки без Redis.
-"""
+"""Хранилище: Upstash Redis как основное persistent storage."""
 from __future__ import annotations
 
 import json
@@ -8,6 +6,7 @@ import os
 from typing import Any
 
 SETTINGS_KEY = "trad:settings"
+SIGNALS_KEY = "trad:signals"
 
 
 class BaseStore:
@@ -16,23 +15,6 @@ class BaseStore:
 
     def set_json(self, key: str, value: Any) -> None:
         raise NotImplementedError
-
-
-class MemoryStore(BaseStore):
-    def __init__(self) -> None:
-        self._data: dict[str, str] = {}
-
-    def get_json(self, key: str) -> Any | None:
-        raw = self._data.get(key)
-        if raw is None:
-            return None
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-
-    def set_json(self, key: str, value: Any) -> None:
-        self._data[key] = json.dumps(value, ensure_ascii=False)
 
 
 class UpstashStore(BaseStore):
@@ -67,12 +49,13 @@ def get_store() -> BaseStore:
     token = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
     if url and token:
         _store = UpstashStore(url, token)
-    else:
-        _store = MemoryStore()
-    return _store
+        return _store
+    raise RuntimeError(
+        "Upstash Redis is not configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN."
+    )
 
 
 def storage_mode() -> str:
     if os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
         return "upstash_redis"
-    return "memory"
+    return "unconfigured"
