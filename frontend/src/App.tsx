@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 
 const API = import.meta.env.VITE_API_BASE ?? "";
+const DEFAULT_PAIR = "EURUSD";
 
 type PairRow = {
   symbol: string;
@@ -51,19 +52,18 @@ function fmtCountdown(sec: number | null | undefined) {
 export default function App() {
   const [rows, setRows] = useState<PairRow[]>([]);
   const [settings, setSettings] = useState<Settings>({
-    selected_pairs: [],
+    selected_pairs: [DEFAULT_PAIR],
     show_all_pairs: true,
   });
   const [storage, setStorage] = useState<string>("");
   const [modal, setModal] = useState<{ title: string; body: string } | null>(null);
-  const [testSymbol, setTestSymbol] = useState("EURUSD");
   /** Локальные переключения до Save; после Save сбрасывается */
   const [draftSel, setDraftSel] = useState<Record<string, boolean>>({});
 
   const loadPairs = useCallback(async () => {
     const r = await fetch(`${API}/api/pairs`);
     const j = await r.json();
-    setSettings(j.settings ?? { selected_pairs: [], show_all_pairs: true });
+    setSettings(j.settings ?? { selected_pairs: [DEFAULT_PAIR], show_all_pairs: true });
     setDraftSel({});
   }, []);
 
@@ -115,25 +115,11 @@ export default function App() {
     await pollSignals();
   }
 
-  async function toggleShowAll(checked: boolean) {
-    setSettings((s) => ({ ...s, show_all_pairs: checked }));
-    await fetch(`${API}/api/pairs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        selected_pairs: settings.selected_pairs,
-        show_all_pairs: checked,
-      }),
-    });
-    await loadPairs();
-    await pollSignals();
-  }
-
   async function sendTest(sig: "BUY" | "SELL") {
     await fetch(`${API}/api/test-signal`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: testSymbol.trim() || "EURUSD", signal: sig }),
+      body: JSON.stringify({ symbol: DEFAULT_PAIR, signal: sig }),
     });
     await pollSignals();
   }
@@ -155,23 +141,6 @@ export default function App() {
       <header className="topbar">
         <div className="brand">trad · TradingView webhook</div>
         <div className="controls">
-          <label className="ctl chk-inline">
-            <input
-              type="checkbox"
-              checked={settings.show_all_pairs}
-              onChange={(e) => toggleShowAll(e.target.checked)}
-            />
-            Показать все пары
-          </label>
-          <label className="ctl">
-            Тестовая пара
-            <input
-              type="text"
-              value={testSymbol}
-              onChange={(e) => setTestSymbol(e.target.value)}
-              placeholder="EURUSD"
-            />
-          </label>
           <button type="button" className="btn ok" onClick={() => sendTest("BUY")}>
             Test BUY
           </button>
@@ -191,9 +160,9 @@ export default function App() {
       <main className="layout">
         <section className="panel">
           <div className="panel-head">
-            <span>Forex pairs</span>
+            <span>EURUSD</span>
             <span className="hint">
-              Отметьте пары → Save. Сигналы только из webhook; данные в Upstash Redis на проде.
+              Сейчас приложение работает только с EURUSD. Позже список пар можно расширить обратно.
             </span>
           </div>
           <div className="table-wrap">
@@ -206,13 +175,12 @@ export default function App() {
                   <th>Entry</th>
                   <th>Expiry</th>
                   <th>Обновлено</th>
-                  <th>Сила</th>
                   <th>Таймер</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((p) => {
+                {rows.filter((p) => p.symbol === DEFAULT_PAIR).map((p) => {
                   const sel = isRowSelected(p);
                   const st = p.ui_status;
                   let rowClass = "";
@@ -270,9 +238,6 @@ export default function App() {
                           : "—"}
                       </td>
                       <td className="mono">{sel ? fmtTime(p.updated_at) : "—"}</td>
-                      <td className="mono">
-                        {sel && p.strength != null ? p.strength : "—"}
-                      </td>
                       <td className="mono">
                         {sel && (st === "BUY" || st === "SELL")
                           ? fmtCountdown(p.countdown_seconds)

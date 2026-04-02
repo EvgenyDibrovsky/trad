@@ -2,6 +2,8 @@
 
 Веб-приложение: **TradingView Alert → webhook → FastAPI → хранилище → React UI**. Автоторговли нет.
 
+Сейчас проект временно настроен только на одну пару: `EURUSD`. Позже список пар можно расширить снова в `backend/config.py`.
+
 Хранение состояния: **Upstash Redis** (REST) на проде/Vercel.
 
 ## Стек
@@ -120,6 +122,10 @@ curl -X POST https://<host>/api/test-signal \
 ### Webhook response
 
 При успешном приёме webhook backend возвращает JSON с `route: "/api/webhook/tradingview"` и `storage: "upstash_redis"`.
+
+## Где расширять пары
+
+Когда понадобится вернуть несколько символов, начните с `backend/config.py` и списка `FOREX_PAIRS`.
 
 ## Ответственность
 

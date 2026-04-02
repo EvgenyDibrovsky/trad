@@ -9,7 +9,7 @@ from backend.storage import SETTINGS_KEY, get_store
 from backend.symbols import validate_known_symbol
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "selected_pairs": [],
+    "selected_pairs": [FOREX_PAIRS[0]],
     "show_all_pairs": True,
 }
 
@@ -28,7 +28,11 @@ def load_settings() -> dict[str, Any]:
     sel = out.get("selected_pairs")
     if not isinstance(sel, list):
         sel = []
-    out["selected_pairs"] = [str(x).strip().upper() for x in sel if str(x).strip()]
+    out["selected_pairs"] = [
+        str(x).strip().upper()
+        for x in sel
+        if str(x).strip().upper() in FOREX_PAIRS
+    ] or [FOREX_PAIRS[0]]
     out["show_all_pairs"] = bool(out.get("show_all_pairs", True))
     return out
 
@@ -41,7 +45,7 @@ def save_settings(data: dict[str, Any]) -> dict[str, Any]:
             sym, _ = validate_known_symbol(str(x))
             if sym:
                 validated.append(sym)
-        cur["selected_pairs"] = validated
+        cur["selected_pairs"] = validated or [FOREX_PAIRS[0]]
     if "show_all_pairs" in data:
         cur["show_all_pairs"] = bool(data["show_all_pairs"])
     get_store().set_json(SETTINGS_KEY, cur)
@@ -190,7 +194,7 @@ def enrich_countdown(rec: dict[str, Any]) -> dict[str, Any]:
 
 def rows_for_api() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     settings = load_settings()
-    selected = set(settings.get("selected_pairs") or [])
+    selected = set(settings.get("selected_pairs") or [FOREX_PAIRS[0]])
     show_all = bool(settings.get("show_all_pairs", True))
     signals = load_all_signals()
 
