@@ -7,8 +7,11 @@ import os
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.config import FOREX_PAIRS
 from backend.state_service import (
@@ -20,6 +23,7 @@ from backend.state_service import (
     save_settings,
     upsert_signal_record,
 )
+from backend.schemas import TestSignalPayload, WebhookPayload
 from backend.storage import storage_mode
 from backend.symbols import validate_known_symbol
 
@@ -41,12 +45,44 @@ app.add_middleware(
 )
 
 
+def json_error(status_code: int, error: str, message: str, **extra: Any) -> JSONResponse:
+    payload: dict[str, Any] = {"ok": False, "error": error, "message": message}
+    payload.update(extra)
+    return JSONResponse(payload, status_code=status_code)
+
+
+def webhook_secret() -> str:
+    secret = os.getenv("WEBHOOK_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError("WEBHOOK_SECRET is not configured.")
+    return secret
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+    if exc.status_code == 404:
+        return json_error(404, "not_found", "Unknown route.")
+    return json_error(exc.status_code, "http_error", str(exc.detail))
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    return json_error(422, "invalid_payload", "Request validation failed.", details=exc.errors())
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    logger.error("Unhandled error: %s", exc)
+    return json_error(500, "internal_error", "Internal server error.")
+
+
 @app.get("/api/status")
 def api_status() -> dict[str, Any]:
     return {
         "ok": True,
         "storage": storage_mode(),
         "pairs_count": len(FOREX_PAIRS),
+        "webhook_secret_configured": bool(os.getenv("WEBHOOK_SECRET", "").strip()),
     }
 
 
@@ -72,53 +108,53 @@ def api_signals() -> dict[str, Any]:
 def api_signals_detail(symbol: str) -> Any:
     sym, err = validate_known_symbol(symbol)
     if err or not sym:
-        return JSONResponse({"error": err or "symbol"}, status_code=400)
+        return json_error(400, "invalid_symbol", err or "symbol")
     rec = load_all_signals().get(sym)
     if not rec:
-        return JSONResponse(
-            {"error": "Нет сохранённого сигнала для этой пары.", "symbol": sym},
-            status_code=404,
-        )
-    return enrich_countdown(dict(rec))
+        return json_error(404, "not_found", "No saved signal for this pair.", symbol=sym)
+    return {"ok": True, "record": enrich_countdown(dict(rec))}
 
 
 @app.post("/api/webhook/tradingview")
 async def webhook_tradingview(request: Request) -> Any:
     raw = await request.body()
-    body: dict[str, Any] = {}
     if raw:
         try:
             data = json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError as e:
-            return JSONResponse(
-                {"ok": False, "error": "invalid_json", "message": str(e)},
-                status_code=400,
-            )
+            return json_error(400, "invalid_json", str(e))
         if not isinstance(data, dict):
-            return JSONResponse(
-                {"ok": False, "error": "invalid_json", "message": "Ожидается JSON-объект"},
-                status_code=400,
-            )
+            return json_error(400, "invalid_json", "Expected JSON object.")
         body = data
     else:
         form = await request.form()
         if form:
             body = dict(form)
+        else:
+            body = {}
 
     if not body:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "empty_body",
-                "message": "Ожидается JSON в теле запроса.",
-            },
-            status_code=400,
-        )
+        return json_error(400, "empty_body", "Expected JSON body.")
+
+    configured_secret = None
+    try:
+        configured_secret = webhook_secret()
+    except RuntimeError as e:
+        return json_error(500, "webhook_secret_not_configured", str(e))
+
+    received_secret = request.headers.get("X-Webhook-Secret") or str(body.get("secret") or "").strip()
+    if not received_secret or received_secret != configured_secret:
+        return json_error(401, "unauthorized_webhook", "Invalid or missing webhook secret.")
 
     try:
-        rec = build_signal_payload(body)
+        payload = WebhookPayload.model_validate(body)
+    except ValidationError as e:
+        return json_error(422, "invalid_payload", "Webhook payload failed validation.", details=e.errors())
+
+    try:
+        rec = build_signal_payload(payload)
         sym = rec["symbol"]
-        upsert_signal_record(sym, rec)
+        saved, deduped = upsert_signal_record(sym, rec)
     except ValueError as e:
         msg = str(e)
         code = "validation_error"
@@ -128,39 +164,32 @@ async def webhook_tradingview(request: Request) -> Any:
             code = "invalid_signal"
         elif "entry_time" in msg.lower():
             code = "invalid_entry_time"
-        return JSONResponse({"ok": False, "error": code, "message": msg}, status_code=400)
+        return json_error(400, code, msg)
 
-    logger.info("webhook_tradingview accepted symbol=%s signal=%s", rec["symbol"], rec["signal"])
+    if not deduped:
+        logger.info("webhook_tradingview accepted symbol=%s signal=%s", saved["symbol"], saved["signal"])
     return {
         "ok": True,
         "route": "/api/webhook/tradingview",
         "storage": storage_mode(),
-        "record": enrich_countdown(rec),
+        "deduped": deduped,
+        "record": saved,
     }
 
 
 @app.post("/api/test-signal")
 def api_test_signal(body: dict[str, Any]) -> Any:
-    sig = str(body.get("signal", "BUY")).strip().upper()
-    payload = {
-        "symbol": body.get("symbol") or "EURUSD",
-        "signal": sig,
-        "timestamp": body.get("timestamp"),
-        "timeframe": body.get("timeframe") or "5",
-        "entry_time": body.get("entry_time"),
-        "expiry_minutes": body.get("expiry_minutes", 5),
-        "strength": body.get("strength", 80),
-        "reasons": body.get("reasons") or ["test"],
-    }
     try:
-        rec = build_signal_payload(payload)
-        upsert_signal_record(rec["symbol"], rec)
+        payload = TestSignalPayload.model_validate(body)
+    except ValidationError as e:
+        return json_error(422, "invalid_payload", "Test payload failed validation.", details=e.errors())
+
+    try:
+        rec = build_signal_payload(payload, source="test")
+        saved, deduped = upsert_signal_record(rec["symbol"], rec)
     except ValueError as e:
-        return JSONResponse(
-            {"ok": False, "error": "validation_error", "message": str(e)},
-            status_code=400,
-        )
-    return {"ok": True, "record": enrich_countdown(rec)}
+        return json_error(400, "validation_error", str(e))
+    return {"ok": True, "deduped": deduped, "record": saved}
 
 
 @app.get("/health")

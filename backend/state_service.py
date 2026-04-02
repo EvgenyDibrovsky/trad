@@ -1,10 +1,11 @@
 """Бизнес-логика: настройки и сигналы в хранилище."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.config import FOREX_PAIRS
+from backend.schemas import WebhookPayload
 from backend.storage import SETTINGS_KEY, get_store
 from backend.symbols import validate_known_symbol
 
@@ -16,8 +17,65 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 SIGNALS_KEY = "trad:signals"
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    return _utc_now().strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
+def _coerce_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    dt = value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(microsecond=0)
+
+
+def _fmt_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    dt = _coerce_utc(value)
+    if dt is None:
+        return None
+    assert dt is not None
+    return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _coerce_utc(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _coerce_utc(parsed)
+
+
+def _resolve_expires_at(rec: dict[str, Any]) -> datetime | None:
+    expires = _parse_utc(rec.get("signal_expires_at"))
+    if expires is not None:
+        return expires
+    entry = _parse_utc(rec.get("entry_at") or rec.get("entry_time"))
+    if entry is None:
+        return None
+    exp = rec.get("expiry_minutes")
+    try:
+        expiry_minutes = int(exp) if exp is not None else None
+    except (TypeError, ValueError):
+        expiry_minutes = None
+    if expiry_minutes is None:
+        return None
+    return entry + timedelta(minutes=expiry_minutes)
 
 
 def load_settings() -> dict[str, Any]:
@@ -67,11 +125,14 @@ def save_all_signals(signals: dict[str, dict[str, Any]]) -> None:
     get_store().set_json(SIGNALS_KEY, signals)
 
 
-def upsert_signal_record(symbol: str, record: dict[str, Any]) -> dict[str, Any]:
+def upsert_signal_record(symbol: str, record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     signals = load_all_signals()
+    existing = signals.get(symbol)
+    if existing and existing.get("last_event_id") == record.get("last_event_id"):
+        return existing, True
     signals[symbol] = record
     save_all_signals(signals)
-    return record
+    return record, False
 
 
 def map_signal(raw: str) -> str:
@@ -85,111 +146,106 @@ def map_signal(raw: str) -> str:
     raise ValueError(f"signal должен быть BUY, SELL или NO_SIGNAL; получено: {raw!r}")
 
 
-def parse_time(s: Any) -> tuple[str | None, str | None]:
-    """Возвращает (iso_utc, error)."""
-    if s is None:
-        return None, None
-    text = str(s).strip()
-    if not text:
-        return None, None
-    z = text.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(z)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00"), None
-    except (TypeError, ValueError):
-        pass
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        try:
-            dt = datetime.strptime(text[:19], fmt).replace(tzinfo=timezone.utc)
-            return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00"), None
-        except ValueError:
-            continue
-    return None, f"не удалось распарсить время: {text!r}"
-
-
-def build_signal_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    sym, err = validate_known_symbol(str(payload.get("symbol", "")))
+def build_signal_payload(payload: WebhookPayload, source: str = "webhook") -> dict[str, Any]:
+    sym, err = validate_known_symbol(payload.symbol)
     if err or not sym:
         raise ValueError(err or "symbol invalid")
 
-    sig = map_signal(str(payload.get("signal", "NO_SIGNAL")))
+    sig = map_signal(payload.signal)
 
-    entry_raw = payload.get("entry_time") or payload.get("entry_at")
-    entry_iso: str | None = None
-    if entry_raw is not None and str(entry_raw).strip():
-        entry_iso, eerr = parse_time(entry_raw)
-        if eerr:
-            raise ValueError(f"entry_time: {eerr}")
+    now_utc = _utc_now()
+    timestamp_utc = _coerce_utc(payload.timestamp) or now_utc
+    entry_utc = _coerce_utc(payload.entry_time) or timestamp_utc or now_utc
+    signal_expires_at = entry_utc + timedelta(minutes=payload.expiry_minutes)
+    event_id = f"{sym}:{sig}:{_fmt_utc(timestamp_utc)}"
 
-    ts_raw = payload.get("timestamp") or payload.get("time")
-    ts_iso, ts_warn = (None, None)
-    if ts_raw is not None and str(ts_raw).strip():
-        ts_iso, ts_warn = parse_time(ts_raw)
-
-    if not entry_iso:
-        entry_iso = _utc_now_iso()
-
-    exp = payload.get("expiry_minutes")
-    try:
-        expiry_minutes = int(exp) if exp is not None else 5
-    except (TypeError, ValueError):
-        expiry_minutes = 5
-
-    tf = payload.get("timeframe") or payload.get("interval")
-    timeframe = str(tf).strip() if tf is not None else None
-
-    st = payload.get("strength")
-    try:
-        strength = int(st) if st is not None else None
-    except (TypeError, ValueError):
-        strength = None
-
-    reasons = payload.get("reasons")
-    if isinstance(reasons, str):
-        reasons_list = [x.strip() for x in reasons.split(";") if x.strip()]
-    elif isinstance(reasons, list):
-        reasons_list = [str(x) for x in reasons]
-    else:
-        reasons_list = []
+    reasons_list = list(payload.reasons)
 
     rec: dict[str, Any] = {
+        "schema_version": payload.schema_version,
         "symbol": sym,
         "signal": sig,
         "ui_status": sig,
-        "entry_time": entry_iso,
-        "entry_at": entry_iso,
-        "expiry_minutes": expiry_minutes,
-        "timeframe": timeframe,
-        "strength": strength,
+        "entry_time": _fmt_utc(entry_utc),
+        "entry_at": _fmt_utc(entry_utc),
+        "expiry_minutes": payload.expiry_minutes,
+        "signal_expires_at": _fmt_utc(signal_expires_at),
+        "timeframe": payload.timeframe,
+        "strength": payload.strength,
         "reasons": reasons_list,
-        "timestamp": ts_iso,
-        "timestamp_raw": str(ts_raw).strip() if ts_raw is not None else None,
-        "timestamp_parse_warning": ts_warn,
+        "timestamp": _fmt_utc(timestamp_utc),
         "updated_at": _utc_now_iso(),
-        "source": "webhook",
+        "source": source,
+        "last_event_id": event_id,
     }
     return rec
 
 
 def enrich_countdown(rec: dict[str, Any]) -> dict[str, Any]:
     out = dict(rec)
-    ea = out.get("entry_at") or out.get("entry_time")
-    if ea and out.get("ui_status") in ("BUY", "SELL"):
-        try:
-            entry = datetime.fromisoformat(str(ea).replace("Z", "+00:00"))
-            if entry.tzinfo is None:
-                entry = entry.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            out["countdown_seconds"] = max(0, int((entry - now).total_seconds()))
-        except (TypeError, ValueError):
-            out["countdown_seconds"] = None
+    expires = _resolve_expires_at(out)
+    now = _utc_now()
+    if out.get("ui_status") in ("BUY", "SELL") and expires is not None:
+        remaining = int((expires - now).total_seconds())
+        out["countdown_seconds"] = max(0, remaining)
+        if remaining <= 0:
+            out["ui_status"] = "NO_SIGNAL"
+            out["signal"] = "NO_SIGNAL"
     else:
         out["countdown_seconds"] = None
     return out
+
+
+def signal_is_active(rec: dict[str, Any]) -> bool:
+    status = str(rec.get("ui_status") or rec.get("signal") or "NO_SIGNAL").upper()
+    if status not in ("BUY", "SELL"):
+        return False
+    expires = _resolve_expires_at(rec)
+    if expires is None:
+        return False
+    return _utc_now() < expires
+
+
+def row_for_signal(symbol: str, rec: dict[str, Any] | None, selected: bool = True) -> dict[str, Any]:
+    if not rec:
+        return {
+            "symbol": symbol,
+            "selected": selected,
+            "ui_status": "NO_SIGNAL",
+            "label": "NO SIGNAL",
+            "signal": "NO_SIGNAL",
+            "entry_time": None,
+            "expiry_minutes": None,
+            "updated_at": None,
+            "timeframe": None,
+            "strength": None,
+            "reasons": [],
+            "signal_expires_at": None,
+            "countdown_seconds": None,
+        }
+
+    ui_status = str(rec.get("ui_status") or rec.get("signal") or "NO_SIGNAL").upper()
+    if not signal_is_active(rec):
+        return {
+            "symbol": symbol,
+            "selected": selected,
+            "ui_status": "NO_SIGNAL",
+            "label": "NO SIGNAL",
+            "signal": "NO_SIGNAL",
+            "entry_time": rec.get("entry_time"),
+            "expiry_minutes": rec.get("expiry_minutes"),
+            "updated_at": rec.get("updated_at"),
+            "timeframe": rec.get("timeframe"),
+            "strength": rec.get("strength"),
+            "reasons": rec.get("reasons", []),
+            "signal_expires_at": rec.get("signal_expires_at"),
+            "countdown_seconds": None,
+            "schema_version": rec.get("schema_version"),
+            "last_event_id": rec.get("last_event_id"),
+        }
+
+    merged = {**rec, "ui_status": ui_status, "selected": selected}
+    return enrich_countdown(merged)
 
 
 def rows_for_api() -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -207,46 +263,6 @@ def rows_for_api() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     for sym in symbols:
         sel = sym in selected
         rec = signals.get(sym)
-        if not sel:
-            rows.append(
-                {
-                    "symbol": sym,
-                    "selected": False,
-                    "ui_status": "OFF",
-                    "label": "—",
-                    "signal": None,
-                    "entry_time": None,
-                    "expiry_minutes": None,
-                    "updated_at": None,
-                    "timeframe": None,
-                    "strength": None,
-                    "reasons": [],
-                    "countdown_seconds": None,
-                }
-            )
-            continue
-
-        if not rec:
-            rows.append(
-                {
-                    "symbol": sym,
-                    "selected": True,
-                    "ui_status": "NO_SIGNAL",
-                    "label": "NO SIGNAL",
-                    "signal": "NO_SIGNAL",
-                    "entry_time": None,
-                    "expiry_minutes": None,
-                    "updated_at": None,
-                    "timeframe": None,
-                    "strength": None,
-                    "reasons": [],
-                    "countdown_seconds": None,
-                }
-            )
-            continue
-
-        ui = rec.get("ui_status") or rec.get("signal") or "NO_SIGNAL"
-        merged = {**rec, "ui_status": ui, "selected": True}
-        rows.append(enrich_countdown(merged))
+        rows.append(row_for_signal(sym, rec, selected=sel))
 
     return rows, settings

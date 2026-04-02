@@ -13,11 +13,14 @@ type PairRow = {
   entry_time?: string | null;
   entry_at?: string | null;
   expiry_minutes?: number | null;
+  signal_expires_at?: string | null;
   updated_at?: string | null;
   timeframe?: string | null;
   strength?: number | null;
   reasons?: string[];
   countdown_seconds?: number | null;
+  schema_version?: number | null;
+  last_event_id?: string | null;
 };
 
 type Settings = {
@@ -56,28 +59,54 @@ export default function App() {
     show_all_pairs: true,
   });
   const [storage, setStorage] = useState<string>("");
+  const [apiStatus, setApiStatus] = useState<"ok" | "offline">("ok");
+  const [apiMessage, setApiMessage] = useState<string>("");
   const [modal, setModal] = useState<{ title: string; body: string } | null>(null);
   /** Локальные переключения до Save; после Save сбрасывается */
   const [draftSel, setDraftSel] = useState<Record<string, boolean>>({});
 
   const loadPairs = useCallback(async () => {
-    const r = await fetch(`${API}/api/pairs`);
-    const j = await r.json();
-    setSettings(j.settings ?? { selected_pairs: [DEFAULT_PAIR], show_all_pairs: true });
-    setDraftSel({});
+    try {
+      const r = await fetch(`${API}/api/pairs`);
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      setSettings(j.settings ?? { selected_pairs: [DEFAULT_PAIR], show_all_pairs: true });
+      setDraftSel({});
+      setApiStatus("ok");
+      setApiMessage("");
+    } catch {
+      setApiStatus("offline");
+      setApiMessage("Backend unavailable");
+    }
   }, []);
 
   const pollSignals = useCallback(async () => {
-    const r = await fetch(`${API}/api/signals`);
-    const j = await r.json();
-    setRows(j.pairs ?? []);
-    if (j.settings) setSettings(j.settings);
+    try {
+      const r = await fetch(`${API}/api/signals`);
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      setRows(j.pairs ?? []);
+      if (j.settings) setSettings(j.settings);
+      setApiStatus("ok");
+      setApiMessage("");
+    } catch {
+      setApiStatus("offline");
+      setApiMessage("Backend unavailable");
+    }
   }, []);
 
   const loadStatus = useCallback(async () => {
-    const r = await fetch(`${API}/api/status`);
-    const j = await r.json();
-    setStorage(j.storage ?? "");
+    try {
+      const r = await fetch(`${API}/api/status`);
+      if (!r.ok) throw new Error(await r.text());
+      const j = await r.json();
+      setStorage(j.storage ?? "");
+      setApiStatus("ok");
+      setApiMessage("");
+    } catch {
+      setApiStatus("offline");
+      setApiMessage("Backend unavailable");
+    }
   }, []);
 
   useEffect(() => {
@@ -99,41 +128,67 @@ export default function App() {
   }
 
   async function savePairs() {
-    const selected: string[] = [];
-    rows.forEach((r) => {
-      if (isRowSelected(r)) selected.push(r.symbol);
-    });
-    await fetch(`${API}/api/pairs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        selected_pairs: selected.filter(Boolean),
-        show_all_pairs: settings.show_all_pairs,
-      }),
-    });
-    await loadPairs();
-    await pollSignals();
+    try {
+      const selected: string[] = [];
+      rows.forEach((r) => {
+        if (isRowSelected(r)) selected.push(r.symbol);
+      });
+      const response = await fetch(`${API}/api/pairs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selected_pairs: selected.filter(Boolean),
+          show_all_pairs: settings.show_all_pairs,
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      await loadPairs();
+      await pollSignals();
+    } catch {
+      setApiStatus("offline");
+      setApiMessage("Backend unavailable");
+    }
   }
 
   async function sendTest(sig: "BUY" | "SELL") {
-    await fetch(`${API}/api/test-signal`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: DEFAULT_PAIR, signal: sig }),
-    });
-    await pollSignals();
+    try {
+      const response = await fetch(`${API}/api/test-signal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schema_version: 1,
+          symbol: DEFAULT_PAIR,
+          signal: sig,
+          timeframe: "5",
+          expiry_minutes: 5,
+          strength: 80,
+          reasons: ["test"],
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      await pollSignals();
+    } catch {
+      setApiStatus("offline");
+      setApiMessage("Backend unavailable");
+    }
   }
 
   async function openDetail(sym: string) {
-    const r = await fetch(`${API}/api/signals/detail?symbol=${encodeURIComponent(sym)}`);
-    const txt = await r.text();
-    let pretty = txt;
     try {
-      pretty = JSON.stringify(JSON.parse(txt), null, 2);
+      const r = await fetch(`${API}/api/signals/detail?symbol=${encodeURIComponent(sym)}`);
+      const txt = await r.text();
+      let pretty = txt;
+      try {
+        pretty = JSON.stringify(JSON.parse(txt), null, 2);
+      } catch {
+        /* keep text */
+      }
+      setModal({ title: sym, body: pretty });
     } catch {
-      /* keep text */
+      setApiStatus("offline");
+      setApiMessage("Backend unavailable");
+      setModal({ title: sym, body: "Backend unavailable" });
     }
-    setModal({ title: sym, body: pretty });
   }
 
   return (
@@ -151,8 +206,8 @@ export default function App() {
             Save selected pairs
           </button>
         </div>
-        <span className="pill ok">
-          API · storage: {storage || "…"} ·{" "}
+        <span className={`pill ${apiStatus === "ok" ? "ok" : "warn"}`}>
+          API · {apiStatus === "ok" ? `storage: ${storage || "…"}` : `offline: ${apiMessage || "unavailable"}`} ·{" "}
           <code>POST …/api/webhook/tradingview</code>
         </span>
       </header>
